@@ -1,0 +1,49 @@
+{
+  "name": "g-brain",
+  "version": "0.1.0",
+  "description": "Enterprise AI Intelligence Operating System",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@8.0.0",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "lint": "turbo run lint",
+    "format": "turbo run format",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "db:migrate": "turbo run db:migrate",
+    "db:rollback": "cd apps/api && alembic downgrade -1",
+    "db:seed": "turbo run db:seed",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "docs": "turbo run docs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.1.0",
+    "turbo": "^1.10.16",
+    "typescript": "^5.3.3"
+  },
+  "keywords": [
+    "enterprise-ai",
+    "knowledge-graph",
+    "agent-orchestration",
+    "ai-automation",
+    "knowledge-management"
+  ],
+  "author": "Claude Code",
+  "license": "PROPRIETARY"
+}

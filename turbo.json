@@ -1,0 +1,98 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["**/.env", "**/.env.local"],
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "NEO4J_URI",
+    "QDRANT_URL",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY"
+  ],
+  "tasks": {
+    "build": {
+      "description": "Build application",
+      "outputs": [".next/**", "dist/**", "build/**"],
+      "cache": true,
+      "dependsOn": ["^build"]
+    },
+    "dev": {
+      "description": "Start development server",
+      "cache": false,
+      "persistent": true
+    },
+    "test": {
+      "description": "Run tests",
+      "outputs": ["coverage/**"],
+      "cache": true,
+      "inputs": ["src/**", "tests/**", "*.config.*"]
+    },
+    "test:e2e": {
+      "description": "Run E2E tests",
+      "cache": false,
+      "dependsOn": ["build"]
+    },
+    "lint": {
+      "description": "Lint code",
+      "cache": true,
+      "inputs": ["src/**", "*.config.*"]
+    },
+    "typecheck": {
+      "description": "Type check code",
+      "cache": true,
+      "inputs": ["src/**", "tsconfig.json"]
+    },
+    "format": {
+      "description": "Format code",
+      "cache": false
+    },
+    "db:migrate": {
+      "description": "Run database migrations",
+      "cache": false,
+      "inputs": ["migrations/**"]
+    },
+    "db:seed": {
+      "description": "Seed database",
+      "cache": false,
+      "dependsOn": ["db:migrate"]
+    },
+    "api": {
+      "description": "Start API server",
+      "cache": false,
+      "persistent": true
+    },
+    "docs": {
+      "description": "Generate documentation",
+      "outputs": ["docs/**"],
+      "cache": true
+    }
+  },
+  "pipeline": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "dist/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "outputs": ["coverage/**"],
+      "cache": true
+    },
+    "test:e2e": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
+    "lint": {
+      "outputs": [],
+      "cache": true
+    },
+    "typecheck": {
+      "outputs": [],
+      "cache": true
+    }
+  }
+}

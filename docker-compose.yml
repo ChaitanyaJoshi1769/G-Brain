@@ -1,0 +1,305 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: gbrain-postgres
+    environment:
+      POSTGRES_DB: gbrain
+      POSTGRES_USER: gbrain_user
+      POSTGRES_PASSWORD: gbrain_password
+      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=pg_stat_statements"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/database/postgresql-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gbrain_user -d gbrain"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gbrain
+
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5.15-enterprise
+    container_name: gbrain-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/gbrain_password
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_allow_load_csv_from_file_urls: "true"
+    ports:
+      - "7687:7687"  # Bolt
+      - "7474:7474"  # HTTP
+    volumes:
+      - neo4j_data:/var/lib/neo4j/data
+      - ./infrastructure/database/neo4j-schema.cypher:/var/lib/neo4j/import/schema.cypher
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "gbrain_password", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gbrain
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: gbrain-redis
+    command: redis-server --appendonly yes --requirepass gbrain_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gbrain
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: gbrain-qdrant
+    environment:
+      QDRANT_API_KEY: gbrain_key
+    ports:
+      - "6333:6333"  # HTTP
+      - "6334:6334"  # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./infrastructure/qdrant/config.yaml:/qdrant/config/local_config.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gbrain
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:latest
+    container_name: gbrain-minio
+    environment:
+      MINIO_ROOT_USER: gbrain_admin
+      MINIO_ROOT_PASSWORD: gbrain_password
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gbrain
+
+  # FastAPI Backend
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: gbrain-api
+    environment:
+      # Database
+      DATABASE_URL: postgresql://gbrain_user:gbrain_password@postgres:5432/gbrain
+      NEO4J_URI: neo4j://neo4j:gbrain_password@neo4j:7687
+      REDIS_URL: redis://:gbrain_password@redis:6379
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: gbrain_key
+
+      # S3
+      AWS_ACCESS_KEY_ID: gbrain_admin
+      AWS_SECRET_ACCESS_KEY: gbrain_password
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: gbrain-documents
+
+      # API
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_WORKERS: 4
+
+      # Environment
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LOG_LEVEL: debug
+
+      # LLM Keys (set in .env)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apps/api:/app
+      - /app/.venv  # Don't volume mount venv
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - gbrain
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # Celery Worker
+  worker:
+    build:
+      context: ./apps/workers
+      dockerfile: Dockerfile
+    container_name: gbrain-worker
+    environment:
+      DATABASE_URL: postgresql://gbrain_user:gbrain_password@postgres:5432/gbrain
+      NEO4J_URI: neo4j://neo4j:gbrain_password@neo4j:7687
+      REDIS_URL: redis://:gbrain_password@redis:6379
+      QDRANT_URL: http://qdrant:6333
+      ENVIRONMENT: development
+      DEBUG: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./apps/workers:/app
+      - /app/.venv
+    depends_on:
+      - api
+      - redis
+      - postgres
+    networks:
+      - gbrain
+    command: celery -A app.celery_app worker --loglevel=debug --concurrency=4
+
+  # Celery Flower (Monitoring)
+  flower:
+    image: mher/flower:2.0
+    container_name: gbrain-flower
+    environment:
+      CELERY_BROKER_URL: redis://:gbrain_password@redis:6379
+      CELERY_RESULT_BACKEND: redis://:gbrain_password@redis:6379
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - worker
+    networks:
+      - gbrain
+
+  # Frontend
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    container_name: gbrain-web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_GRAPHQL_URL: http://localhost:8000/graphql
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - api
+    networks:
+      - gbrain
+    command: npm run dev
+
+  # Prometheus (Metrics)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gbrain-prometheus
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - gbrain
+
+  # Grafana (Dashboards)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gbrain-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: gbrain_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - gbrain
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  redis_data:
+  qdrant_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  gbrain:
+    driver: bridge
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# Start all services:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f [service-name]
+#
+# Stop services:
+#   docker-compose down
+#
+# Clean everything:
+#   docker-compose down -v
+#
+# =============================================================================
+# SERVICE ENDPOINTS
+# =============================================================================
+# API: http://localhost:8000
+# API Docs: http://localhost:8000/docs
+# GraphQL: http://localhost:8000/graphql
+# Frontend: http://localhost:3000
+# PostgreSQL: localhost:5432
+# Neo4j Browser: http://localhost:7474
+# Redis: localhost:6379
+# Qdrant: http://localhost:6333
+# MinIO: http://localhost:9000
+# MinIO Console: http://localhost:9001
+# Flower: http://localhost:5555
+# Prometheus: http://localhost:9090
+# Grafana: http://localhost:3001
