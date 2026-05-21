@@ -1,0 +1,214 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gbrain-api
+  namespace: gbrain
+  labels:
+    app: gbrain
+    component: api
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gbrain
+      component: api
+  template:
+    metadata:
+      labels:
+        app: gbrain
+        component: api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: gbrain-api
+      containers:
+      - name: api
+        image: gbrain/api:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        - name: metrics
+          containerPort: 8001
+          protocol: TCP
+
+        env:
+        - name: ENVIRONMENT
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: gbrain-secrets
+              key: database-url
+        - name: NEO4J_URL
+          valueFrom:
+            secretKeyRef:
+              name: gbrain-secrets
+              key: neo4j-url
+        - name: QDRANT_URL
+          value: "http://qdrant:6333"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: CLAUDE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gbrain-secrets
+              key: claude-api-key
+
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        volumeMounts:
+        - name: config
+          mountPath: /etc/gbrain
+          readOnly: true
+        - name: logs
+          mountPath: /var/log/gbrain
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+
+      volumes:
+      - name: config
+        configMap:
+          name: gbrain-config
+      - name: logs
+        emptyDir: {}
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - gbrain
+              topologyKey: kubernetes.io/hostname
+
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values:
+                - compute
+
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "gbrain"
+        effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gbrain-api
+  namespace: gbrain
+  labels:
+    app: gbrain
+    component: api
+spec:
+  type: LoadBalancer
+  selector:
+    app: gbrain
+    component: api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 8001
+    targetPort: 8001
+    protocol: TCP
+  sessionAffinity: ClientIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gbrain-api-hpa
+  namespace: gbrain
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gbrain-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Max
